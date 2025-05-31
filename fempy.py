@@ -44,7 +44,6 @@ class FunctionSpace(ABC):
         pass
 
     @abstractmethod
-    """For a 1D mesh [0, 0.5, 1.0] with two linear elements (element 0: [0, 0.5], element 1: [0.5, 1.0]), local node 1 in element 0 might map to global node 1 (x=0.5)."""
     def local_to_global(self, e, k):
         pass
 
@@ -111,7 +110,12 @@ class FunctionSpaceSeg1(FunctionSpace):
 
         # Consecutive nodes form an element: (0,1), (1,2), (2,3), ...
         self.elements = np.array([(i, i + 1) for i in range(self.n_elements)])
-        self.element_sizes = np.array([self.nodal_coordinates[i + 1] - self.nodal_coordinates[i] for i in range(self.n_elements)])
+        self.element_sizes = np.array(
+            [
+                self.nodal_coordinates[i + 1] - self.nodal_coordinates[i]
+                for i in range(self.n_elements)
+            ]
+        )
 
         # Attach quadrature rule
         self.quad_rule = self.QuadratureRule1PointSeg1()
@@ -277,7 +281,12 @@ class FunctionSpaceSeg2(FunctionSpace):
 
         # Ordering: (0,1,2), (2,3,4), (4,5,6), ...
         self.elements = np.array([(2 * i, 2 * i + 1, 2 * i + 2) for i in range(self.n_elements)])
-        self.element_sizes = np.array([self.p1_nodal_coordinates[i + 1] - self.p1_nodal_coordinates[i] for i in range(self.n_elements)])
+        self.element_sizes = np.array(
+            [
+                self.p1_nodal_coordinates[i + 1] - self.p1_nodal_coordinates[i]
+                for i in range(self.n_elements)
+            ]
+        )
 
         # Attach quadrature rule
         self.quad_rule = self.QuadratureRule3PointSeg2()
@@ -428,6 +437,10 @@ class System(ABC):
         pass
 
     @abstractmethod
+    def assemble_rhs(self):
+        pass
+
+    @abstractmethod
     def assemble_residual(self):
         pass
 
@@ -437,6 +450,10 @@ class System(ABC):
 
     @abstractmethod
     def assemble_element_stiffness(self, e):
+        pass
+
+    @abstractmethod
+    def assemble_element_rhs(self, e):
         pass
 
     @abstractmethod
@@ -480,17 +497,25 @@ class SteadyStateHeatTransferSystem(System):
 
     @override
     def assemble_stiffness(self):
+        self.K[:, :] = 0
+
         for e in range(self.V.n_elements):
             self.assemble_element_stiffness(e)
 
         return
 
     @override
-    def assemble_residual(self):
+    def assemble_rhs(self):
+        self.Q[:] = 0
+
         for e in range(self.V.n_elements):
-            self.assemble_element_residual(e)
+            self.assemble_element_rhs(e)
 
         return
+
+    @override
+    def assemble_residual(self):
+        pass
 
     @override
     def assemble_element_capacity(self, e):
@@ -512,10 +537,11 @@ class SteadyStateHeatTransferSystem(System):
             W = self.V.quad_rule.weight[g]
             # Jacobian
             J = self.V.J(e, pos)
+
             # Conductivity
             k_g = 0.0
-            for k in range(n_element_nodes):
-                k_g += local_k[k] * self.V.ref_N(k, pos)
+            for c in range(n_element_nodes):
+                k_g += local_k[c] * self.V.ref_N(c, pos)
 
             for a in range(n_element_nodes):
                 for b in range(n_element_nodes):
@@ -534,7 +560,7 @@ class SteadyStateHeatTransferSystem(System):
         return
 
     @override
-    def assemble_element_residual(self, e):
+    def assemble_element_rhs(self, e):
         # Compute
         n_element_nodes = self.V.n_element_nodes
         n_quad = self.V.quad_rule.n_quad
@@ -549,10 +575,11 @@ class SteadyStateHeatTransferSystem(System):
             W = self.V.quad_rule.weight[g]
             # Jacobian
             J = self.V.J(e, pos)
+
             # Heat source/sink
             Q_g = 0.0
-            for k in range(n_element_nodes):
-                Q_g += local_Q[k] * self.V.ref_N(k, pos)
+            for c in range(n_element_nodes):
+                Q_g += local_Q[c] * self.V.ref_N(c, pos)
 
             for a in range(n_element_nodes):
                 Na = self.V.ref_N(a, pos)
@@ -566,6 +593,10 @@ class SteadyStateHeatTransferSystem(System):
             self.q[i] += local_q[a]
 
         return
+
+    @override
+    def assemble_element_residual(self, e):
+        pass
 
     @override
     def apply_BCs(self):
@@ -599,33 +630,170 @@ class SteadyStateHeatTransferSystem(System):
 
 # TODO: implement this
 class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
-    """Build the capacity matrix, stiffness matrix K and RHS vector q from V."""
+    """Build the capacity matrix and residual vector from V."""
 
-    def __init__(self, V, c, k, Q):
-        pass
+    def __init__(self, V, k, c, rho, Q):
+        self.V = V
+
+        # Conductivity, density, heat capacity, and heat source/sink
+        self.k = k
+        self.c = c
+        self.rho = rho
+        self.Q = Q
+
+        # Vector of unknowns
+        self.u = np.zeros(self.V.n_nodes)
+
+        # Global residual and capacity
+        self.res = np.zeros(self.V.n_nodes)
+        self.capacity_matrix = np.zeros((self.V.n_nodes, self.V.n_nodes))
+        # diagonal lumped capacity matrix
+        self.capacity_lumped = np.zeros(self.V.n_nodes)
+
+        # Boundary condition types and values (0 = Neumann, 1 = Dirichlet)
+        self.BC_types = np.zeros(self.V.n_nodes)
+        self.BC_values = np.zeros(self.V.n_nodes)
 
     @override
     def assemble_capacity(self):
-        pass
+        self.capacity_matrix[:, :] = 0
+        self.capacity_lumped[:] = 0
+
+        # calcula la matriz de capacidad consistente
+        for e in range(self.V.n_elements):
+            self.assemble_element_capacity(e)
+
+        for col in range(self.V.n_nodes):
+            sum = 0.0
+            # suma en cada fila y asigna a la diagonal
+            for row in range(self.V.n_nodes):
+                sum += self.capacity_matrix[col][row]
+
+            # de la matriz de capacidad lumpeada
+            self.capacity_lumped[col] = sum
+
+        return
 
     @override
     def assemble_stiffness(self):
         pass
 
     @override
-    def assemble_residual(self):
+    def assemble_rhs(self):
         pass
 
     @override
+    def assemble_residual(self):
+        self.res[:] = 0
+
+        for e in range(self.V.n_elements):
+            self.assemble_element_residual(e)
+
+        return
+
+    @override
     def assemble_element_capacity(self, e):
-        pass
+        n_element_nodes = self.V.n_element_nodes
+        n_quad = self.V.quad_rule.n_quad
+
+        local_capacity = np.zeros((n_element_nodes, n_element_nodes))
+        local_rho = self.V.localize(e, self.rho)
+        local_c = self.V.localize(e, self.c)
+
+        for g in range(n_quad):
+            # Quadrature data
+            pos = self.V.quad_rule.position[g]
+            W = self.V.quad_rule.weight[g]
+            # Jacobian
+            J = self.V.J(e, pos)
+
+            # Heat capacity
+            c_g = 0.0
+            # Material density
+            rho_g = 0.0
+            for c in range(n_element_nodes):
+                # interpola y obtiene el valor en los P.G.
+                c_g += local_c[c] * self.V.ref_N(c, pos)
+                rho_g += local_rho[c] * self.V.ref_N(c, pos)
+
+            for a in range(n_element_nodes):
+                for b in range(n_element_nodes):
+                    Na = self.V.ref_N(a, pos)
+                    Nb = self.V.ref_N(b, pos)
+
+                    local_capacity[a][b] += Na * Nb * c_g * rho_g * W * J
+
+        for a in range(n_element_nodes):
+            for b in range(n_element_nodes):
+                # Assemble to global capacity
+                i, j = self.V.local_to_global(e, a), self.V.local_to_global(e, b)
+                self.capacity_matrix[i, j] += local_capacity[a, b]
 
     @override
     def assemble_element_stiffness(self, e):
         pass
 
     @override
+    def assemble_element_rhs(self, e):
+        pass
+
+    @override
     def assemble_element_residual(self, e):
+        # Compute
+        n_element_nodes = self.V.n_element_nodes
+        n_quad = self.V.quad_rule.n_quad
+        # Local residual vector
+        local_res = np.zeros(n_element_nodes)
+        # Local u
+        local_u = self.V.localize(e, self.u)
+        # Local conductivity
+        local_k = self.V.localize(e, self.k)
+        # Local heat source/sink vector
+        local_Q = self.V.localize(e, self.Q)
+
+        for g in range(n_quad):
+            # Quadrature data
+            pos = self.V.quad_rule.position[g]
+            W = self.V.quad_rule.weight[g]
+            # Jacobian
+            J = self.V.J(e, pos)
+
+            # Conductivity
+            k_g = 0.0
+            # Heat source/sink
+            Q_g = 0.0
+            for c in range(n_element_nodes):
+                k_g += local_k[c] * self.V.ref_N(c, pos)
+                Q_g += local_Q[c] * self.V.ref_N(c, pos)
+
+            # grad(u) (scalar in 1D)
+            grad_u_g = 0.0
+            for b in range(n_element_nodes):
+                dNb = self.V.ref_dN_deta(b, pos)
+                grad_u_g += local_u[b] * (dNb / J)
+
+            # integral del termino fuente/sumidero
+            for a in range(n_element_nodes):
+                Na = self.V.ref_N(a, pos)
+
+                # Add to local RHS
+                local_res[a] += Na * Q_g * W * J
+
+            # integral del termino gradN_a · gradT
+            for a in range(n_element_nodes):
+                dNa = self.V.ref_dN_deta(a, pos)
+
+                # Add to local stiffness
+                local_res[a] -= k_g * (dNa / J) * grad_u_g * W * J
+
+        for a in range(n_element_nodes):
+            # Assemble to global RHS
+            i = self.V.local_to_global(e, a)
+            self.res[i] += local_res[a]
+
+        return
+
+    def stable_dt(self):
         pass
 
     @override
@@ -633,8 +801,8 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
         pass
 
     @override
-    def apply_initial_conditions(self):
-        pass
+    def apply_initial_conditions(self, u):
+        self.u = u
 
 
 # -----------------------------------------------------------------------------
@@ -679,8 +847,10 @@ class SteadyStateSolver(Solver):
 
 # TODO: implement this
 class ForwardEulerSolver(Solver):
-    def __init__(self):
-        pass
+    def __init__(self, system):
+        self.system = system
+        # Assemble the capacity matrix
+        self.system.assemble_capacity()
 
     @override
     def solve(self):
@@ -688,7 +858,28 @@ class ForwardEulerSolver(Solver):
 
     @override
     def step(self, dt):
-        pass
+        # Assemble the residual vector
+        self.system.assemble_residual()
+
+        res = self.system.res
+
+        # nodos Neumann
+        for i in range(self.system.V.n_nodes):
+            if system.BC_types[i] == 0:
+                res[i] += system.BC_values[i]
+
+        # Matriz de masa lumpeada, calculada una sola vez al crear este objeto
+        C_lumped = self.system.capacity_lumped
+
+        for i in range(self.system.V.n_nodes):
+            self.system.u[i] += (dt / C_lumped[i]) * res[i]
+
+        for i in range(self.system.V.n_nodes):
+            # nodos Dirichlet
+            if system.BC_types[i] == 1:
+                self.system.u[i] = system.BC_values[i]
+
+        return
 
 
 # TODO: implement this
@@ -719,7 +910,7 @@ if __name__ == "__main__":
 
     mesh = Mesh1D(x_coords)
     # modifiable (P1, P2, etc.)
-    V = FunctionSpaceSeg2(mesh)
+    V = FunctionSpaceSeg1(mesh)
 
     # Print some info
     print("Elements and nodal coordinates")
@@ -731,36 +922,68 @@ if __name__ == "__main__":
     # STEP 2: define the system
     # Uniform conductivity, modifiable
     k = np.zeros(V.n_nodes)
-    k[:] = 1.0e-14
+    k[:] = 15
+    # Uniform heat capacity
+    c = np.zeros(V.n_nodes)
+    c[:] = 500
+    # Uniform density
+    rho = np.zeros(V.n_nodes)
+    rho[:] = 8000
+
     # Uniform heat source/sink, modifiable
     Q = np.zeros(V.n_nodes)
-    Q[:] = 1.0e-13
+    Q[:] = 0.0
 
     # Construct the system, modifiable (transient, etc.)
-    system = SteadyStateHeatTransferSystem(V, k, Q)
+    system = TransientHeatTransferSystem(V, k, c, rho, Q)
 
     # Boundary conditions, modifiable
     # Dirichlet BCs on the left
     system.BC_types[0] = 1
-    # Neumann on the right
-    system.BC_types[V.n_nodes - 1] = 0
+    # Dirichlet on the right
+    system.BC_types[V.n_nodes - 1] = 1
     # Of values 0
     system.BC_values[0] = 0
-    # And 2.0e14 in-flux (negative)
-    system.BC_values[V.n_nodes - 1] = -2.0e-14
+    system.BC_values[V.n_nodes - 1] = 0
 
     # STEP 3: assemble and solve
     # Solver type is also modifiable
-    solver = SteadyStateSolver(system)
-    solver.solve()
+    solver = ForwardEulerSolver(system)
+    # Initial conditions
+    u_0 = np.zeros(V.n_nodes)
+    u_0[:] = 1
+    system.apply_initial_conditions(u_0)
 
-    # Print some info
-    print("Stiffness matrix K")
-    print(system.K)
-    print("RHS vector q")
-    print(system.q)
-    print("Solution vector u")
-    print(system.u)
+    # Diffusivity
+    alpha = k[0] / (c[0] * rho[0])
+    # Delta x
+    dx = domain_length / (n_nodes - 1)
+    # dt = CFL * dx^2 / alpha
+    dt = 0.4 * dx * dx / alpha
+    # Implementar esto
+    # dt = system.stable_dt()
+
+    # Step in time
+    t_max = 15000
+    t = 0
+
+    while t < t_max:
+        print("Solution vector u, t =", t)
+        print(system.u)
+        solver.step(dt)
+        # Analytical solution
+        analytical = np.zeros(V.n_nodes)
+        for i in range(500):
+            analytical += (
+                (4 / np.pi)
+                * (np.sin((2 * i + 1) * np.pi * x_coords) / (2 * i + 1))
+                * np.exp(-(((2 * i + 1) * np.pi) ** 2) * alpha * t)
+            )
+
+        print("Analytical solution, t =", t)
+        print(analytical, "\n")
+
+        t += dt
 
     # STEP 4: plot the solution
     plt.rcParams["font.size"] = 16
@@ -769,8 +992,6 @@ if __name__ == "__main__":
     # FEM solution
     plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="None", markersize=8, label="FEM")
 
-    # Analytical solution
-    analytical = [-5 * x * x + 8 * x for x in V.nodal_coordinates]
     plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
     plt.xlabel("$x$ [m]")
