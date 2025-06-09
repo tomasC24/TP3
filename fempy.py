@@ -654,6 +654,11 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
         self.BC_types = np.zeros(self.V.n_nodes)
         self.BC_values = np.zeros(self.V.n_nodes)
 
+        self.A = np.zeros((self.V.n_nodes, self.V.n_nodes))
+        self.b = np.zeros(self.V.n_nodes)
+
+        self.q = np.zeros(self.V.n_nodes)
+
     @override
     def assemble_capacity(self):
         self.capacity_matrix[:, :] = 0
@@ -680,7 +685,12 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
 
     @override
     def assemble_rhs(self):
-        pass
+        self.Q[:] = 0
+
+        for e in range(self.V.n_elements):
+            self.assemble_element_rhs(e)
+
+        return
 
     @override
     def assemble_residual(self):
@@ -735,7 +745,38 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
 
     @override
     def assemble_element_rhs(self, e):
-        pass
+        # Compute
+        n_element_nodes = self.V.n_element_nodes
+        n_quad = self.V.quad_rule.n_quad
+        # Local RHS vector
+        local_q = np.zeros(n_element_nodes)
+        # Local heat source/sink vector
+        local_Q = self.V.localize(e, self.Q)
+
+        for g in range(n_quad):
+            # Quadrature data
+            pos = self.V.quad_rule.position[g]
+            W = self.V.quad_rule.weight[g]
+            # Jacobian
+            J = self.V.J(e, pos)
+
+            # Heat source/sink
+            Q_g = 0.0
+            for c in range(n_element_nodes):
+                Q_g += local_Q[c] * self.V.ref_N(c, pos)
+
+            for a in range(n_element_nodes):
+                Na = self.V.ref_N(a, pos)
+
+                # Add to local RHS
+                local_q[a] += Na * Q_g * W * J
+
+        for a in range(n_element_nodes):
+            # Assemble to global RHS
+            i = self.V.local_to_global(e, a)
+            self.q[i] += local_q[a]
+
+        return
 
     @override
     def assemble_element_residual(self, e):
@@ -793,12 +834,97 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
 
         return
 
+    def assemble_a(self, dt):
+        self.A[:, :] = 0
+        for e in range(self.V.n_elements):
+            self.assemble_element_a(e, dt)
+        return
+
+    def assemble_element_a(self, e, dt):
+        # Compute
+        n_element_nodes = self.V.n_element_nodes
+        n_quad = self.V.quad_rule.n_quad
+        # Local stiffness matrix
+        local_A = np.zeros((n_element_nodes, n_element_nodes))
+        # Local conductivity
+        local_k = self.V.localize(e, self.k)
+        local_capacity = np.zeros((n_element_nodes, n_element_nodes))
+        local_rho = self.V.localize(e, self.rho)
+        local_c = self.V.localize(e, self.c)
+
+        for g in range(n_quad):
+            # Quadrature data
+            pos = self.V.quad_rule.position[g]
+            W = self.V.quad_rule.weight[g]
+            # Jacobian
+            J = self.V.J(e, pos)
+
+            # Conductivity
+            k_g = 0.0
+            for c in range(n_element_nodes):
+                k_g += local_k[c] * self.V.ref_N(c, pos)
+
+            # Heat capacity
+            c_g = 0.0
+            # Material density
+            rho_g = 0.0
+            for c in range(n_element_nodes):
+                # interpola y obtiene el valor en los P.G.
+                c_g += local_c[c] * self.V.ref_N(c, pos)
+                rho_g += local_rho[c] * self.V.ref_N(c, pos)
+
+            for a in range(n_element_nodes):
+                for b in range(n_element_nodes):
+                    dNa = self.V.ref_dN_deta(a, pos)
+                    dNb = self.V.ref_dN_deta(b, pos)
+                    Na = self.V.ref_N(a, pos)
+                    Nb = self.V.ref_N(b, pos)
+
+                    # Add to local stiffness
+                    local_A[a, b] += (k_g * (dNa / J) * (dNb / J) + (Na * Nb * c_g * rho_g)/dt )* W * J
+
+        for a in range(n_element_nodes):
+            for b in range(n_element_nodes):
+                # Assemble to global stiffness
+                i, j = self.V.local_to_global(e, a), self.V.local_to_global(e, b)
+                self.A[i, j] += local_A[a, b]
+
+        return
+
+    def assemble_b(self, u_prev, dt):
+        # Compute b = (C / dt) @ u_prev + q
+        C_over_dt = self.capacity_matrix / dt
+        self.b = C_over_dt @ u_prev + self.q
+        return
+
     def stable_dt(self):
         pass
 
     @override
     def apply_BCs(self):
-        pass
+        # Dirichlet BCs
+        dirichlet_nodes = np.where(self.BC_types == 1)[0]
+
+        for i in dirichlet_nodes:
+            u_bar = self.BC_values[i]
+
+            # Substract the i-th column times u_bar
+            self.q -= self.K[:, i] * u_bar
+
+            # Zero the i-th row/column
+            self.K[i, :] = 0.0
+            self.K[:, i] = 0.0
+
+            # And set the corresponding diagonal value to 1, RHS to u_bar
+            self.K[i, i] = 1.0
+            self.q[i] = u_bar
+
+        # Neumann BCs
+        neumann_nodes = np.where(self.BC_types == 0)[0]
+
+        for i in neumann_nodes:
+            self.q[i] += self.BC_values[i]
+
 
     @override
     def apply_initial_conditions(self, u):
@@ -865,8 +991,8 @@ class ForwardEulerSolver(Solver):
 
         # nodos Neumann
         for i in range(self.system.V.n_nodes):
-            if system.BC_types[i] == 0:
-                res[i] += system.BC_values[i]
+            if self.system.BC_types[i] == 0:
+                res[i] += self.system.BC_values[i]
 
         # Matriz de masa lumpeada, calculada una sola vez al crear este objeto
         C_lumped = self.system.capacity_lumped
@@ -876,16 +1002,22 @@ class ForwardEulerSolver(Solver):
 
         for i in range(self.system.V.n_nodes):
             # nodos Dirichlet
-            if system.BC_types[i] == 1:
-                self.system.u[i] = system.BC_values[i]
+            if self.system.BC_types[i] == 1:
+                self.system.u[i] = self.system.BC_values[i]
 
         return
 
 
 # TODO: implement this
 class BackwardEulerSolver(Solver):
-    def __init__(self):
-        pass
+    def __init__(self,system):
+        self.system = system
+
+        self.system.assemble_capacity()
+        self.u_prev = np.copy(self.system.u)
+
+        self.system.assemble_rhs()
+
 
     @override
     def solve(self):
@@ -893,14 +1025,21 @@ class BackwardEulerSolver(Solver):
 
     @override
     def step(self, dt):
+        self.system.assemble_a(dt)
+        self.system.assemble_b(self.u_prev,dt)
+        # Apply the BCs
+        self.system.apply_BCs()
+
+        # And solve the system of linear equations
+        # TODO: implement a CG solver that utilizes the skyline storage scheme
+        u_new = np.linalg.solve(self.system.A, self.system.b)
+
+        self.system.u = u_new
+        self.u_prev = np.copy(u_new)
         pass
 
 
-# -----------------------------------------------------------------------------
-# Example run, change the parameters, function space, system, BCs and solver
-# accordingly to generate different cases
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":
+def run_steady_state():
     # Definition of the geometry
     domain_length = 1.0
     n_nodes = 11
@@ -910,7 +1049,87 @@ if __name__ == "__main__":
 
     mesh = Mesh1D(x_coords)
     # modifiable (P1, P2, etc.)
-    V = FunctionSpaceSeg1(mesh)
+    V = FunctionSpaceSeg2(mesh)
+
+    # Print some info
+    print("Elements and nodal coordinates")
+    for elem in V.elements:
+        print(elem)
+        for node in elem:
+            print(V.nodal_coordinates[node])
+
+    # STEP 2: define the system
+    # Uniform conductivity, modifiable
+    k = np.zeros(V.n_nodes)
+    k[:] = 1.0e-14
+    # Uniform heat capacity
+    c = np.zeros(V.n_nodes)
+    c[:] = 1.0
+    # Uniform density
+    rho = np.zeros(V.n_nodes)
+    rho[:] = 1.0
+    # Uniform heat source/sink, modifiable
+    Q = np.zeros(V.n_nodes)
+    Q[:] = 1.0e-13
+
+    # Construct the system, modifiable (transient, etc.)
+    system = TransientHeatTransferSystem(V, k, c, rho, Q)
+
+    # Boundary conditions, modifiable
+    # Dirichlet BCs on the left
+    system.BC_types[0] = 1
+    # Dirichlet on the right
+    system.BC_types[V.n_nodes - 1] = 1
+    # Of values 0
+    system.BC_values[0] = 0
+    system.BC_values[V.n_nodes - 1] = 0
+
+    # STEP 3: assemble and solve
+    # Solver type is also modifiable
+    # solver = SteadyStateSolver(system)
+    # solver.solve()
+
+    # Print some info
+    print("Stiffness matrix K")
+    print(system.K)
+    print("RHS vector q")
+    print(system.q)
+    print("Solution vector u")
+    print(system.u)
+
+    # STEP 4: plot the solution
+    plt.rcParams["font.size"] = 16
+    plt.figure()
+
+    # FEM solution
+    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
+
+    # Analytical solution
+    analytical = [-5 * x * x + 8 * x for x in V.nodal_coordinates]
+    plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
+
+    plt.xlabel("$x$ [m]")
+    plt.ylabel(r"Temperature $u$ [°C]")
+    plt.title("1D Steady-State Temperature Profile")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return
+
+
+def run_transient_explicit():
+    # Definition of the geometry
+    domain_length = 1.0
+    n_nodes = 11
+
+    # STEP 1: create geometry + basis
+    x_coords = np.linspace(0.0, domain_length, n_nodes)  # np.linspace(start, stop, N)
+
+    mesh = Mesh1D(x_coords)
+    # modifiable (P1, P2, etc.)
+    V = FunctionSpaceSeg2(mesh)
 
     # Print some info
     print("Elements and nodal coordinates")
@@ -948,7 +1167,7 @@ if __name__ == "__main__":
 
     # STEP 3: assemble and solve
     # Solver type is also modifiable
-    solver = ForwardEulerSolver(system)
+    solver = BackwardEulerSolver(system)
     # Initial conditions
     u_0 = np.zeros(V.n_nodes)
     u_0[:] = 1
@@ -958,8 +1177,9 @@ if __name__ == "__main__":
     alpha = k[0] / (c[0] * rho[0])
     # Delta x
     dx = domain_length / (n_nodes - 1)
-    # dt = CFL * dx^2 / alpha
-    dt = 0.4 * dx * dx / alpha
+    # dt = CFL * 0.5 * dx^2 / alpha para elementos lineales
+    # dt = CFL * 0.083 * dx² / alpha para elementos cuadraticos
+    dt = 0.9 * 0.083 * dx * dx / alpha
     # Implementar esto
     # dt = system.stable_dt()
 
@@ -971,17 +1191,6 @@ if __name__ == "__main__":
         print("Solution vector u, t =", t)
         print(system.u)
         solver.step(dt)
-        # Analytical solution
-        analytical = np.zeros(V.n_nodes)
-        for i in range(500):
-            analytical += (
-                (4 / np.pi)
-                * (np.sin((2 * i + 1) * np.pi * x_coords) / (2 * i + 1))
-                * np.exp(-(((2 * i + 1) * np.pi) ** 2) * alpha * t)
-            )
-
-        print("Analytical solution, t =", t)
-        print(analytical, "\n")
 
         t += dt
 
@@ -990,7 +1199,16 @@ if __name__ == "__main__":
     plt.figure()
 
     # FEM solution
-    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="None", markersize=8, label="FEM")
+    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
+
+    # Analytical solution
+    analytical = np.zeros(V.n_nodes)
+    for i in range(1000):
+        analytical += (
+            (4 / np.pi)
+            * (np.sin((2 * i + 1) * np.pi * V.nodal_coordinates / domain_length) / (2 * i + 1))
+            * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
+        )
 
     plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
@@ -1001,3 +1219,15 @@ if __name__ == "__main__":
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+    return
+
+
+def main():
+    run_transient_explicit()
+
+    return
+
+
+if __name__ == "__main__":
+    main()
