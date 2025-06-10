@@ -891,10 +891,62 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
 
         return
 
-    def assemble_b(self, u_prev, dt):
-        # Compute b = (C / dt) @ u_prev + q
-        C_over_dt = self.capacity_matrix / dt
-        self.b = C_over_dt @ u_prev + self.q
+    @override
+    def assemble_b(self, dt):
+        # (C*T^(n-1) /dt)
+        self.b[:] = 0
+
+        for e in range(self.V.n_elements):
+            self.assemble_element_b(e, dt)
+
+        return
+
+    @override
+    def assemble_element_b(self, e, dt):
+        # Compute
+        n_element_nodes = self.V.n_element_nodes
+        n_quad = self.V.quad_rule.n_quad
+        # Local LeftSide vector
+        local_b = np.zeros(n_element_nodes)
+        # Local heat source/sink vector
+        local_Q = self.V.localize(e, self.Q)
+        local_rho = self.V.localize(e, self.rho)
+        local_c = self.V.localize(e, self.c)
+        # Local u
+        local_u = self.V.localize(e, self.u)
+
+        for g in range(n_quad):
+            # Quadrature data
+            pos = self.V.quad_rule.position[g]
+            W = self.V.quad_rule.weight[g]
+            # Jacobian
+            J = self.V.J(e, pos)
+
+            # Heat source/sink
+            Q_g = 0.0
+            # Heat capacity
+            c_g = 0.0
+            # Material density
+            rho_g = 0.0
+            # Previous temperature
+            u_g = 0.0
+            for c in range(n_element_nodes):
+                Q_g += local_Q[c] * self.V.ref_N(c, pos)
+                c_g += local_c[c] * self.V.ref_N(c, pos)
+                rho_g += local_rho[c] * self.V.ref_N(c, pos)
+                u_g += local_u[c] * self.V.ref_N(c, pos)
+
+            for a in range(n_element_nodes):
+                Na = self.V.ref_N(a, pos)
+
+                # Add to local LS
+                local_b[a] += ((Na * Q_g) + (rho_g * c_g * Na * u_g / dt)) * W * J
+
+        for a in range(n_element_nodes):
+            # Assemble to global LS
+            i = self.V.local_to_global(e, a)
+            self.b[i] += local_b[a]
+
         return
 
     def stable_dt(self):
@@ -908,22 +960,24 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
         for i in dirichlet_nodes:
             u_bar = self.BC_values[i]
 
-            # Substract the i-th column times u_bar
-            self.q -= self.K[:, i] * u_bar
+            # Subtract the i-th column of A times u_bar from b
+            self.b -= self.A[:, i] * u_bar
 
-            # Zero the i-th row/column
-            self.K[i, :] = 0.0
-            self.K[:, i] = 0.0
+            # Zero the i-th row and column of A
+            self.A[i, :] = 0.0
+            self.A[:, i] = 0.0
 
-            # And set the corresponding diagonal value to 1, RHS to u_bar
-            self.K[i, i] = 1.0
-            self.q[i] = u_bar
+            # Set the diagonal to 1
+            self.A[i, i] = 1.0
+
+            # Set b[i] to u_bar
+            self.b[i] = u_bar
 
         # Neumann BCs
         neumann_nodes = np.where(self.BC_types == 0)[0]
 
         for i in neumann_nodes:
-            self.q[i] += self.BC_values[i]
+            self.b[i] += self.BC_values[i]
 
 
     @override
@@ -956,7 +1010,7 @@ class SteadyStateSolver(Solver):
         # Assemble the stiffness matrix
         self.system.assemble_stiffness()
         # Assemble the RHS vector
-        self.system.assemble_residual()
+        self.system.assemble_rhs()
         # Apply the BCs
         self.system.apply_BCs()
 
@@ -1013,10 +1067,7 @@ class BackwardEulerSolver(Solver):
     def __init__(self,system):
         self.system = system
 
-        self.system.assemble_capacity()
-        self.u_prev = np.copy(self.system.u)
 
-        self.system.assemble_rhs()
 
 
     @override
@@ -1026,16 +1077,15 @@ class BackwardEulerSolver(Solver):
     @override
     def step(self, dt):
         self.system.assemble_a(dt)
-        self.system.assemble_b(self.u_prev,dt)
+        self.system.assemble_b(dt)
         # Apply the BCs
         self.system.apply_BCs()
 
         # And solve the system of linear equations
         # TODO: implement a CG solver that utilizes the skyline storage scheme
-        u_new = np.linalg.solve(self.system.A, self.system.b)
 
-        self.system.u = u_new
-        self.u_prev = np.copy(u_new)
+        self.system.u = np.linalg.solve(self.system.A, self.system.b)
+
         pass
 
 
@@ -1073,7 +1123,7 @@ def run_steady_state():
     Q[:] = 1.0e-13
 
     # Construct the system, modifiable (transient, etc.)
-    system = TransientHeatTransferSystem(V, k, c, rho, Q)
+    system = SteadyStateHeatTransferSystem(V, k, Q)
 
     # Boundary conditions, modifiable
     # Dirichlet BCs on the left
@@ -1120,6 +1170,109 @@ def run_steady_state():
 
 
 def run_transient_explicit():
+    # Definition of the geometry
+    domain_length = 1.0
+    n_nodes = 11
+
+    # STEP 1: create geometry + basis
+    x_coords = np.linspace(0.0, domain_length, n_nodes)  # np.linspace(start, stop, N)
+
+    mesh = Mesh1D(x_coords)
+    # modifiable (P1, P2, etc.)
+    V = FunctionSpaceSeg2(mesh)
+
+    # Print some info
+    print("Elements and nodal coordinates")
+    for elem in V.elements:
+        print(elem)
+        for node in elem:
+            print(V.nodal_coordinates[node])
+
+    # STEP 2: define the system
+    # Uniform conductivity, modifiable
+    k = np.zeros(V.n_nodes)
+    k[:] = 15
+    # Uniform heat capacity
+    c = np.zeros(V.n_nodes)
+    c[:] = 500
+    # Uniform density
+    rho = np.zeros(V.n_nodes)
+    rho[:] = 8000
+
+    # Uniform heat source/sink, modifiable
+    Q = np.zeros(V.n_nodes)
+    Q[:] = 1.0e-13
+
+    # Construct the system, modifiable (transient, etc.)
+    system = TransientHeatTransferSystem(V, k, c, rho, Q)
+
+    # Boundary conditions, modifiable
+    # Dirichlet BCs on the left
+    system.BC_types[0] = 1
+    # Dirichlet on the right
+    system.BC_types[V.n_nodes - 1] = 1
+    # Of values 0
+    system.BC_values[0] = 0
+    system.BC_values[V.n_nodes - 1] = 0
+
+    # STEP 3: assemble and solve
+    # Solver type is also modifiable
+    solver = ForwardEulerSolver(system)
+    # Initial conditions
+    u_0 = np.zeros(V.n_nodes)
+    u_0[:] = 1
+    system.apply_initial_conditions(u_0)
+
+    # Diffusivity
+    alpha = k[0] / (c[0] * rho[0])
+    # Delta x
+    dx = domain_length / (n_nodes - 1)
+    # dt = CFL * 0.5 * dx^2 / alpha para elementos lineales
+    # dt = CFL * 0.083 * dx² / alpha para elementos cuadraticos
+    dt = 0.9 * 0.083 * dx * dx / alpha
+    # Implementar esto
+    # dt = system.stable_dt()
+
+    # Step in time
+    t_max = 15000
+    t = 0
+
+    while t < t_max:
+        print("Solution vector u, t =", t)
+        print(system.u)
+        solver.step(dt)
+
+        t += dt
+
+    # STEP 4: plot the solution
+    plt.rcParams["font.size"] = 16
+    plt.figure()
+
+    # FEM solution
+    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
+
+    # Analytical solution
+    analytical = np.zeros(V.n_nodes)
+    for i in range(1000):
+        analytical += (
+            (4 / np.pi)
+            * (np.sin((2 * i + 1) * np.pi * V.nodal_coordinates / domain_length) / (2 * i + 1))
+            * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
+        )
+
+    plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
+
+    plt.xlabel("$x$ [m]")
+    plt.ylabel(r"Temperature $u$ [°C]")
+    plt.title("1D Transient-State Temperature Profile")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return
+
+def run_transient_implicit():
     # Definition of the geometry
     domain_length = 1.0
     n_nodes = 11
@@ -1214,7 +1367,7 @@ def run_transient_explicit():
 
     plt.xlabel("$x$ [m]")
     plt.ylabel(r"Temperature $u$ [°C]")
-    plt.title("1D Steady-State Temperature Profile")
+    plt.title("1D Transient-State Implicit Temperature Profile")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -1222,9 +1375,10 @@ def run_transient_explicit():
 
     return
 
-
 def main():
-    run_transient_explicit()
+    #run_steady_state()
+    run_transient_implicit()
+    #run_transient_explicit()
 
     return
 
