@@ -120,6 +120,8 @@ class FunctionSpaceSeg1(FunctionSpace):
         # Attach quadrature rule
         self.quad_rule = self.QuadratureRule1PointSeg1()
 
+        self.stability_constant = 0.5  # Added for P1 elements
+
     # Helper functions for assembling -----------------------------------------
     """Maps (element index, local node index) to global node index.
 
@@ -290,6 +292,8 @@ class FunctionSpaceSeg2(FunctionSpace):
 
         # Attach quadrature rule
         self.quad_rule = self.QuadratureRule3PointSeg2()
+
+        self.stability_constant = 0.083  # Added for P2 elements
 
     # Helper functions for assembling -----------------------------------------
     """Maps (element index, local node index) to global node index.
@@ -949,9 +953,16 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
 
         return
 
-    def stable_dt(self):
-
-        pass
+    def stable_dt(self, CFL):
+        dt_min = float('inf')
+        for e in range(self.V.n_elements):
+            nodes = self.V.elements[e]
+            alpha_e = max(self.k[i] / (self.c[i] * self.rho[i]) for i in nodes)
+            dx_e = self.V.element_sizes[e]
+            dt_e = CFL * self.V.stability_constant * dx_e**2 / alpha_e
+            if dt_e < dt_min:
+                dt_min = dt_e
+        return dt_min
 
     @override
     def apply_BCs(self):
@@ -1207,11 +1218,12 @@ def run_transient_explicit():
     # Boundary conditions, modifiable
     # Dirichlet BCs on the left
     system.BC_types[0] = 1
-    # Dirichlet on the right
+    # Neumann on the right
     system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = 0
     system.BC_values[V.n_nodes - 1] = -2.0e-14
+
 
     # STEP 3: assemble and solve
     # Solver type is also modifiable
@@ -1222,14 +1234,14 @@ def run_transient_explicit():
     system.apply_initial_conditions(u_0)
 
     # Diffusivity
-    alpha = k[0] / (c[0] * rho[0])
+    # alpha = k[0] / (c[0] * rho[0])
     # Delta x
-    dx = domain_length / (n_nodes - 1)
+    # dx = domain_length / (n_nodes - 1)
     # dt = CFL * 0.5 * dx^2 / alpha para elementos lineales
     # dt = CFL * 0.083 * dx² / alpha para elementos cuadraticos
-    dt = 0.9 * 0.083 * dx * dx / alpha
+    # dt = 0.9 * 0.083 * dx * dx / alpha
     # Implementar esto
-    # dt = system.stable_dt()
+    dt = system.stable_dt(CFL = 0.9)
 
     # Step in time
     t_max = 15000
@@ -1251,6 +1263,7 @@ def run_transient_explicit():
 
     # Analytical solution
     analytical = np.zeros(V.n_nodes)
+    alpha = k[0] / (c[0] * rho[0])
     for i in range(1000):
         analytical += (
             (4 / np.pi)
@@ -1262,7 +1275,7 @@ def run_transient_explicit():
 
     plt.xlabel("$x$ [m]")
     plt.ylabel(r"Temperature $u$ [°C]")
-    plt.title("1D Transient-State Temperature Profile")
+    plt.title("1D Transient-Explicit Temperature Profile")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -1308,9 +1321,9 @@ def run_transient_implicit():
     system = TransientHeatTransferSystem(V, k, c, rho, Q)
 
     # Boundary conditions, modifiable
-    # Dirichlet BCs on the left
+    # Neumann BCs on the left
     system.BC_types[0] = 0
-    # Dirichlet on the right
+    # Neumann on the right
     system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = -10
@@ -1331,8 +1344,6 @@ def run_transient_implicit():
     # dt = CFL * 0.5 * dx^2 / alpha para elementos lineales
     # dt = CFL * 0.083 * dx² / alpha para elementos cuadraticos
     dt = 0.9 * 0.083 * dx * dx / alpha
-    # Implementar esto
-    # dt = system.stable_dt()
 
     # Step in time
     t_max = 15000
@@ -1365,7 +1376,7 @@ def run_transient_implicit():
 
     plt.xlabel("$x$ [m]")
     plt.ylabel(r"Temperature $u$ [°C]")
-    plt.title("1D Transient-State Implicit Temperature Profile")
+    plt.title("1D Transient-Implicit Temperature Profile")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -1375,10 +1386,14 @@ def run_transient_implicit():
 
 def main():
     #run_steady_state()
-    run_transient_implicit()
-    #run_transient_explicit()
+    #run_transient_implicit()
+    run_transient_explicit()
 
     return
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
