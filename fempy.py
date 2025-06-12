@@ -501,25 +501,17 @@ class SteadyStateHeatTransferSystem(System):
 
     @override
     def assemble_stiffness(self):
-        self.K[:, :] = 0
-
         for e in range(self.V.n_elements):
             self.assemble_element_stiffness(e)
 
         return
 
     @override
-    def assemble_rhs(self):
-        self.Q[:] = 0
-
+    def assemble_residual(self):
         for e in range(self.V.n_elements):
-            self.assemble_element_rhs(e)
+            self.assemble_element_residual(e)
 
         return
-
-    @override
-    def assemble_residual(self):
-        pass
 
     @override
     def assemble_element_capacity(self, e):
@@ -541,11 +533,10 @@ class SteadyStateHeatTransferSystem(System):
             W = self.V.quad_rule.weight[g]
             # Jacobian
             J = self.V.J(e, pos)
-
             # Conductivity
             k_g = 0.0
-            for c in range(n_element_nodes):
-                k_g += local_k[c] * self.V.ref_N(c, pos)
+            for k in range(n_element_nodes):
+                k_g += local_k[k] * self.V.ref_N(k, pos)
 
             for a in range(n_element_nodes):
                 for b in range(n_element_nodes):
@@ -564,7 +555,7 @@ class SteadyStateHeatTransferSystem(System):
         return
 
     @override
-    def assemble_element_rhs(self, e):
+    def assemble_element_residual(self, e):
         # Compute
         n_element_nodes = self.V.n_element_nodes
         n_quad = self.V.quad_rule.n_quad
@@ -579,11 +570,10 @@ class SteadyStateHeatTransferSystem(System):
             W = self.V.quad_rule.weight[g]
             # Jacobian
             J = self.V.J(e, pos)
-
             # Heat source/sink
             Q_g = 0.0
-            for c in range(n_element_nodes):
-                Q_g += local_Q[c] * self.V.ref_N(c, pos)
+            for k in range(n_element_nodes):
+                Q_g += local_Q[k] * self.V.ref_N(k, pos)
 
             for a in range(n_element_nodes):
                 Na = self.V.ref_N(a, pos)
@@ -597,10 +587,6 @@ class SteadyStateHeatTransferSystem(System):
             self.q[i] += local_q[a]
 
         return
-
-    @override
-    def assemble_element_residual(self, e):
-        pass
 
     @override
     def apply_BCs(self):
@@ -629,6 +615,14 @@ class SteadyStateHeatTransferSystem(System):
 
     @override
     def apply_initial_conditions(self):
+        pass
+
+    @override
+    def assemble_element_rhs(self, e):
+        pass
+
+    @override
+    def assemble_rhs(self):
         pass
 
 
@@ -1049,7 +1043,7 @@ class SteadyStateSolver(Solver):
         # Assemble the stiffness matrix
         self.system.assemble_stiffness()
         # Assemble the RHS vector
-        self.system.assemble_rhs()
+        self.system.assemble_residual()
         # Apply the BCs
         self.system.apply_BCs()
 
@@ -1162,9 +1156,11 @@ def run_steady_state():
     system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = 0
+    # And 2.0e14 in-flux (negative)
     system.BC_values[V.n_nodes - 1] = -2.0e-14
 
     # STEP 3: assemble and solve
+    # Solver type is also modifiable
     solver = SteadyStateSolver(system)
     solver.solve()
 
@@ -1181,7 +1177,7 @@ def run_steady_state():
     plt.figure()
 
     # FEM solution
-    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
+    plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="None", markersize=8, label="FEM")
 
     # Analytical solution
     analytical = [-5 * x * x + 8 * x for x in V.nodal_coordinates]
@@ -1391,8 +1387,8 @@ def run_transient_implicit():
 
 def main():
     run_steady_state()
-    #run_transient_implicit()
-    #run_transient_explicit()
+    run_transient_implicit()
+    run_transient_explicit()
 
     return
 
