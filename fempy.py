@@ -950,6 +950,7 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
         return
 
     def stable_dt(self):
+
         pass
 
     @override
@@ -1066,9 +1067,6 @@ class ForwardEulerSolver(Solver):
 class BackwardEulerSolver(Solver):
     def __init__(self,system):
         self.system = system
-
-
-
 
     @override
     def solve(self):
@@ -1210,10 +1208,10 @@ def run_transient_explicit():
     # Dirichlet BCs on the left
     system.BC_types[0] = 1
     # Dirichlet on the right
-    system.BC_types[V.n_nodes - 1] = 1
+    system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = 0
-    system.BC_values[V.n_nodes - 1] = 0
+    system.BC_values[V.n_nodes - 1] = -2.0e-14
 
     # STEP 3: assemble and solve
     # Solver type is also modifiable
@@ -1311,12 +1309,12 @@ def run_transient_implicit():
 
     # Boundary conditions, modifiable
     # Dirichlet BCs on the left
-    system.BC_types[0] = 1
+    system.BC_types[0] = 0
     # Dirichlet on the right
-    system.BC_types[V.n_nodes - 1] = 1
+    system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
-    system.BC_values[0] = 0
-    system.BC_values[V.n_nodes - 1] = 0
+    system.BC_values[0] = -10
+    system.BC_values[V.n_nodes - 1] = -10.0
 
     # STEP 3: assemble and solve
     # Solver type is also modifiable
