@@ -996,6 +996,33 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
     def apply_initial_conditions(self, u):
         self.u = u
 
+    def analytical_solution(self, t, alpha, domain_length):
+        x = self.V.nodal_coordinates
+        analytical = np.zeros_like(x)
+
+        # Dirichlet - Dirichlet
+        if self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 1:
+            for i in range(1000):
+                analytical += (
+                        (4 / np.pi)
+                        * (np.sin((2 * i + 1) * np.pi * x / domain_length) / (2 * i + 1))
+                        * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
+                )
+
+        # Dirichlet - Neumann
+        elif self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 0:
+            for i in range(1000):
+                analytical += (
+                        (4 / ((2 * i + 1) * np.pi))
+                        * np.sin(((2 * i + 1) * np.pi / (2 * domain_length)) * x)
+                        * np.exp(-alpha * ((2 * i + 1) * np.pi / (2 * domain_length)) ** 2 * t)
+                )
+
+        # Neumann - Neumann
+        elif self.BC_types[0] == 0 and self.BC_types[self.V.n_nodes - 1] == 0:
+            analytical = np.zeros_like(x) + 1
+        return analytical
+
 
 # -----------------------------------------------------------------------------
 # 4) LinearSolver - wraps NumPy's linear solver
@@ -1121,12 +1148,6 @@ def run_steady_state():
     # Uniform conductivity, modifiable
     k = np.zeros(V.n_nodes)
     k[:] = 1.0e-14
-    # Uniform heat capacity
-    c = np.zeros(V.n_nodes)
-    c[:] = 1.0
-    # Uniform density
-    rho = np.zeros(V.n_nodes)
-    rho[:] = 1.0
     # Uniform heat source/sink, modifiable
     Q = np.zeros(V.n_nodes)
     Q[:] = 1.0e-13
@@ -1137,16 +1158,15 @@ def run_steady_state():
     # Boundary conditions, modifiable
     # Dirichlet BCs on the left
     system.BC_types[0] = 1
-    # Dirichlet on the right
-    system.BC_types[V.n_nodes - 1] = 1
+    # Neumann on the right
+    system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = 0
-    system.BC_values[V.n_nodes - 1] = 0
+    system.BC_values[V.n_nodes - 1] = -2.0e-14
 
     # STEP 3: assemble and solve
-    # Solver type is also modifiable
-    # solver = SteadyStateSolver(system)
-    # solver.solve()
+    solver = SteadyStateSolver(system)
+    solver.solve()
 
     # Print some info
     print("Stiffness matrix K")
@@ -1210,19 +1230,19 @@ def run_transient_explicit():
 
     # Uniform heat source/sink, modifiable
     Q = np.zeros(V.n_nodes)
-    Q[:] = 1.0e-13
+    Q[:] = 0
 
     # Construct the system, modifiable (transient, etc.)
     system = TransientHeatTransferSystem(V, k, c, rho, Q)
 
     # Boundary conditions, modifiable
-    # Dirichlet BCs on the left
+    # BCs on the left ( 1 = Dirichlet, 0 = Neumann)
     system.BC_types[0] = 1
-    # Neumann on the right
-    system.BC_types[V.n_nodes - 1] = 0
+    # BCs on the right
+    system.BC_types[V.n_nodes - 1] = 1
     # Of values 0
     system.BC_values[0] = 0
-    system.BC_values[V.n_nodes - 1] = -2.0e-14
+    system.BC_values[V.n_nodes - 1] = 0
 
 
     # STEP 3: assemble and solve
@@ -1240,7 +1260,6 @@ def run_transient_explicit():
     # dt = CFL * 0.5 * dx^2 / alpha para elementos lineales
     # dt = CFL * 0.083 * dx² / alpha para elementos cuadraticos
     # dt = 0.9 * 0.083 * dx * dx / alpha
-    # Implementar esto
     dt = system.stable_dt(CFL = 0.9)
 
     # Step in time
@@ -1262,14 +1281,8 @@ def run_transient_explicit():
     plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
 
     # Analytical solution
-    analytical = np.zeros(V.n_nodes)
-    alpha = k[0] / (c[0] * rho[0])
-    for i in range(1000):
-        analytical += (
-            (4 / np.pi)
-            * (np.sin((2 * i + 1) * np.pi * V.nodal_coordinates / domain_length) / (2 * i + 1))
-            * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
-        )
+    alpha = k[0] / (c[0] * rho[0]) #Calculo alpha asumiendolo uniforme para la solución analítica.
+    analytical = system.analytical_solution(t, alpha, domain_length)
 
     plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
@@ -1321,16 +1334,15 @@ def run_transient_implicit():
     system = TransientHeatTransferSystem(V, k, c, rho, Q)
 
     # Boundary conditions, modifiable
-    # Neumann BCs on the left
-    system.BC_types[0] = 0
-    # Neumann on the right
+    # BCs on the left ( 1 = Dirichlet, 0 = Neumann)
+    system.BC_types[0] = 1
+    # BCS on the right
     system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
-    system.BC_values[0] = -10
-    system.BC_values[V.n_nodes - 1] = -10.0
+    system.BC_values[0] = 0
+    system.BC_values[V.n_nodes - 1] = 0
 
     # STEP 3: assemble and solve
-    # Solver type is also modifiable
     solver = BackwardEulerSolver(system)
     # Initial conditions
     u_0 = np.zeros(V.n_nodes)
@@ -1364,13 +1376,7 @@ def run_transient_implicit():
     plt.plot(V.nodal_coordinates, system.u, marker="o", linestyle="--", markersize=8, label="FEM")
 
     # Analytical solution
-    analytical = np.zeros(V.n_nodes)
-    for i in range(1000):
-        analytical += (
-            (4 / np.pi)
-            * (np.sin((2 * i + 1) * np.pi * V.nodal_coordinates / domain_length) / (2 * i + 1))
-            * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
-        )
+    analytical = system.analytical_solution(t, alpha, domain_length)
 
     plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
@@ -1381,16 +1387,14 @@ def run_transient_implicit():
     plt.legend()
     plt.tight_layout()
     plt.show()
-
     return
 
 def main():
-    #run_steady_state()
+    run_steady_state()
     #run_transient_implicit()
-    run_transient_explicit()
+    #run_transient_explicit()
 
     return
-
 
 if __name__ == "__main__":
     main()
