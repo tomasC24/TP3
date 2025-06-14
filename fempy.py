@@ -994,27 +994,33 @@ class TransientHeatTransferSystem(SteadyStateHeatTransferSystem):
         x = self.V.nodal_coordinates
         analytical = np.zeros_like(x)
 
-        # Dirichlet - Dirichlet
-        if self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 1:
-            for i in range(1000):
-                analytical += (
-                        (4 / np.pi)
-                        * (np.sin((2 * i + 1) * np.pi * x / domain_length) / (2 * i + 1))
-                        * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
-                )
+        if self.BC_values[0] == 0 and self.BC_values[self.V.n_nodes - 1] == 0:
+            # Dirichlet - Dirichlet
+            if self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 1:
+                for i in range(1000):
+                    analytical += (
+                            (4 / np.pi)
+                            * (np.sin((2 * i + 1) * np.pi * x / domain_length) / (2 * i + 1))
+                            * np.exp(-(((2 * i + 1) * np.pi / domain_length) ** 2) * alpha * t)
+                    )
 
-        # Dirichlet - Neumann
-        elif self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 0:
-            for i in range(1000):
-                analytical += (
-                        (4 / ((2 * i + 1) * np.pi))
-                        * np.sin(((2 * i + 1) * np.pi / (2 * domain_length)) * x)
-                        * np.exp(-alpha * ((2 * i + 1) * np.pi / (2 * domain_length)) ** 2 * t)
-                )
+            # Dirichlet - Neumann
+            elif self.BC_types[0] == 1 and self.BC_types[self.V.n_nodes - 1] == 0:
+                for i in range(1000):
+                    analytical += (
+                            (4 / ((2 * i + 1) * np.pi))
+                            * np.sin(((2 * i + 1) * np.pi / (2 * domain_length)) * x)
+                            * np.exp(-alpha * ((2 * i + 1) * np.pi / (2 * domain_length)) ** 2 * t)
+                    )
 
-        # Neumann - Neumann
-        elif self.BC_types[0] == 0 and self.BC_types[self.V.n_nodes - 1] == 0:
-            analytical = np.zeros_like(x) + 1
+            # Neumann - Neumann
+            elif self.BC_types[0] == 0 and self.BC_types[self.V.n_nodes - 1] == 0:
+                analytical = np.zeros_like(x) + 1
+
+            else:
+                analytical = "No implementada"
+        else:
+            analytical = "No implementada"
         return analytical
 
 
@@ -1235,7 +1241,7 @@ def run_transient_explicit():
     # BCs on the left ( 1 = Dirichlet, 0 = Neumann)
     system.BC_types[0] = 1
     # BCs on the right
-    system.BC_types[V.n_nodes - 1] = 1
+    system.BC_types[V.n_nodes - 1] = 0
     # Of values 0
     system.BC_values[0] = 0
     system.BC_values[V.n_nodes - 1] = 0
@@ -1280,7 +1286,9 @@ def run_transient_explicit():
     alpha = k[0] / (c[0] * rho[0]) #Calculo alpha asumiendolo uniforme para la solución analítica.
     analytical = system.analytical_solution(t, alpha, domain_length)
 
-    plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
+    if not isinstance(analytical, str):
+
+        plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
     plt.xlabel("$x$ [m]")
     plt.ylabel(r"Temperature $u$ [°C]")
@@ -1333,7 +1341,7 @@ def run_transient_implicit():
     # BCs on the left ( 1 = Dirichlet, 0 = Neumann)
     system.BC_types[0] = 1
     # BCS on the right
-    system.BC_types[V.n_nodes - 1] = 0
+    system.BC_types[V.n_nodes - 1] = 1
     # Of values 0
     system.BC_values[0] = 0
     system.BC_values[V.n_nodes - 1] = 0
@@ -1374,7 +1382,8 @@ def run_transient_implicit():
     # Analytical solution
     analytical = system.analytical_solution(t, alpha, domain_length)
 
-    plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
+    if not isinstance(analytical, str):
+        plt.plot(V.nodal_coordinates, analytical, linestyle="-", linewidth=2, label="Analytical")
 
     plt.xlabel("$x$ [m]")
     plt.ylabel(r"Temperature $u$ [°C]")
@@ -1383,12 +1392,13 @@ def run_transient_implicit():
     plt.legend()
     plt.tight_layout()
     plt.show()
+
     return
 
 def main():
     run_steady_state()
-    run_transient_implicit()
     run_transient_explicit()
+    run_transient_implicit()
 
     return
 
